@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+release/
+VaultData/
+*.spec
+.env
+.env.*
+!.env.example
+*.log
+*.jpv.zip
+*.jpv.enc
