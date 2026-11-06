@@ -1,0 +1,5 @@
+#!/bin/sh
+if [ -x .venv/Scripts/python.exe ]; then
+    exec .venv/Scripts/python.exe scripts/check_secrets.py
+fi
+exec python scripts/check_secrets.py

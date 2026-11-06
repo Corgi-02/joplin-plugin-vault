@@ -1,11 +1,13 @@
 import base64
 import contextlib
+import os
 import tempfile
 import threading
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 from xml.sax.saxutils import escape
 
 from vault.core import VaultError
@@ -202,6 +204,27 @@ class WebDavTests(unittest.TestCase):
         for url in ['https://user:secret@example.invalid/dav/', 'https://example.invalid/dav/../notes/', 'ftp://example.invalid/dav/']:
             with self.assertRaises(VaultError): WebDav(url)
         with self.assertRaises(VaultError): self.dav.download('../notes', self.root)
+
+    def test_cleartext_http_is_limited_to_literal_loopback_addresses(self):
+        for host in ['example.invalid', '192.168.1.10', 'localhost', '127.0.0.1.example.invalid', '2130706433']:
+            with self.subTest(host=host), self.assertRaisesRegex(VaultError, 'HTTPS'):
+                WebDav('http://' + host + '/backups/', 'user', 'secret')
+        for url in ['http://127.0.0.1/backups/', 'http://[::1]/backups/', 'https://example.invalid/backups/']:
+            with self.subTest(url=url):
+                self.assertTrue(WebDav(url, 'user', 'secret').auth)
+
+    def test_cross_origin_or_downgrade_is_rejected_before_network_request(self):
+        dav = WebDav('https://example.invalid/backups/', 'user', 'secret')
+        with patch.object(dav.opener, 'open') as send:
+            for url in ['http://example.invalid/backups/', 'https://other.invalid/backups/']:
+                with self.subTest(url=url), self.assertRaises(VaultError):
+                    dav.request('GET', url)
+            send.assert_not_called()
+
+    def test_loopback_credentials_do_not_use_environment_proxy(self):
+        with patch.dict(os.environ, {'http_proxy': 'http://127.0.0.1:1', 'no_proxy': ''}):
+            dav = WebDav(self.base, 'user', 'secret', timeout=5)
+            self.assertEqual(dav.test(), 0)
 
 
 if __name__ == '__main__': unittest.main()

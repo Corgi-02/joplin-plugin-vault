@@ -58,12 +58,12 @@ class CoreTests(unittest.TestCase):
     def tearDown(self): self.temp.cleanup()
 
     def test_full_roundtrip_preserves_notes_and_non_plugin_settings(self):
-        saved = self.engine.backup(self.source, self.root / 'backups')
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
         before_settings, before_notes = database(self.target)
         preview = self.engine.preview(saved, self.target)
         self.assertEqual(preview['install'], ['test.example'])
         self.assertEqual(preview['remove'], ['target.extra'])
-        result = self.engine.restore(saved, self.target, self.root / 'recovery', expected_hash=preview['archive_sha256'])
+        result = self.engine.restore(saved, self.target, self.root / 'recovery', expected_hash=preview['archive_sha256'], password='fixture-password')
         after_settings, after_notes = database(self.target)
         self.assertEqual(before_notes, after_notes)
         self.assertEqual(after_settings['sync.target'], before_settings['sync.target'])
@@ -78,6 +78,7 @@ class CoreTests(unittest.TestCase):
         self.assertFalse((self.target / 'plugins/target.extra.jpl').exists())
         self.assertEqual(json.loads((self.target / 'plugin-data/test.example/preferences.json').read_text())['value'], 'source')
         self.assertTrue(Path(result['recovery_backup']).exists())
+        self.assertEqual(Path(result['recovery_backup']).suffix, '.enc')
 
     def test_encrypted_roundtrip_and_wrong_password(self):
         saved = self.engine.backup(self.source, self.root / 'backups', '复杂 password 123')
@@ -94,29 +95,29 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(VaultError): self.engine.preview(saved, self.target, 'password123')
 
     def test_failed_restore_rolls_back_files_database_and_json(self):
-        saved = self.engine.backup(self.source, self.root / 'backups')
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
         before = database(self.target)
         old_config = (self.target / 'settings.json').read_bytes()
         old_jpl = (self.target / 'plugins/target.extra.jpl').read_bytes()
         def fail(): raise RuntimeError('injected failure')
         with self.assertRaisesRegex(RuntimeError, 'injected'):
-            self.engine.restore(saved, self.target, self.root / 'recovery', fault=fail)
+            self.engine.restore(saved, self.target, self.root / 'recovery', fault=fail, password='fixture-password')
         self.assertEqual(database(self.target), before)
         self.assertEqual((self.target / 'settings.json').read_bytes(), old_config)
         self.assertEqual((self.target / 'plugins/target.extra.jpl').read_bytes(), old_jpl)
         self.assertFalse((self.target / 'plugin-vault-recovery.json').exists())
 
     def test_archive_change_after_preview_is_rejected(self):
-        saved = self.engine.backup(self.source, self.root / 'backups')
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
         preview = self.engine.preview(saved, self.target)
         with saved.open('ab') as f: f.write(b'changed')
         before = database(self.target)
         with self.assertRaises(VaultError):
-            self.engine.restore(saved, self.target, self.root / 'recovery', expected_hash=preview['archive_sha256'])
+            self.engine.restore(saved, self.target, self.root / 'recovery', expected_hash=preview['archive_sha256'], password='fixture-password')
         self.assertEqual(database(self.target), before)
 
     def test_preview_hash_matches_verified_copy_when_original_changes(self):
-        saved = self.engine.backup(self.source, self.root / 'backups')
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
         original_hash = digest(saved)
 
         def change_original(frozen):
@@ -129,11 +130,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(preview['archive_sha256'], original_hash)
         before = database(self.target)
         with self.assertRaisesRegex(VaultError, '预览后发生变化'):
-            self.engine.restore(saved, self.target, self.root / 'recovery', expected_hash=preview['archive_sha256'])
+            self.engine.restore(saved, self.target, self.root / 'recovery', expected_hash=preview['archive_sha256'], password='fixture-password')
         self.assertEqual(database(self.target), before)
 
     def test_malformed_manifest_is_rejected_before_target_changes(self):
-        saved = self.engine.backup(self.source, self.root / 'backups')
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
         with zipfile.ZipFile(saved) as source:
             original = json.loads(source.read('manifest.json'))
         cases = [[], {**original, 'settings_database': []}, {**original, 'settings_files': []},
@@ -149,30 +150,30 @@ class CoreTests(unittest.TestCase):
                     for item in source.infolist():
                         target.writestr(item.filename, json.dumps(manifest) if item.filename == 'manifest.json' else source.read(item.filename))
                 with self.assertRaises(VaultError):
-                    self.engine.restore(malformed, self.target, self.root / 'recovery')
+                    self.engine.restore(malformed, self.target, self.root / 'recovery', password='fixture-password')
                 self.assertEqual(database(self.target), before)
                 self.assertFalse((self.root / 'recovery').exists())
 
     def test_traversal_archive_cannot_escape(self):
-        saved = self.engine.backup(self.source, self.root / 'backups')
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
         evil = self.root / 'evil.zip'
         with zipfile.ZipFile(saved) as src, zipfile.ZipFile(evil, 'w') as dst:
             for item in src.infolist(): dst.writestr(item.filename, src.read(item.filename))
             dst.writestr('../escape.txt', 'no')
-        with self.assertRaises(VaultError): self.engine.restore(evil, self.target, self.root / 'recovery')
+        with self.assertRaises(VaultError): self.engine.restore(evil, self.target, self.root / 'recovery', password='fixture-password')
         self.assertFalse((self.root / 'escape.txt').exists())
 
     def test_corrupted_payload_rejected_before_changes(self):
-        saved = self.engine.backup(self.source, self.root / 'backups')
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
         evil = self.root / 'bad.zip'
         with zipfile.ZipFile(saved) as src, zipfile.ZipFile(evil, 'w') as dst:
             for item in src.infolist(): dst.writestr(item.filename, b'bad' if item.filename.endswith('.jpl') else src.read(item.filename))
         before = database(self.target)
-        with self.assertRaises(VaultError): self.engine.restore(evil, self.target, self.root / 'recovery')
+        with self.assertRaises(VaultError): self.engine.restore(evil, self.target, self.root / 'recovery', password='fixture-password')
         self.assertEqual(database(self.target), before)
 
     def test_foreign_settings_in_manifest_are_rejected(self):
-        saved = self.engine.backup(self.source, self.root / 'backups')
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
         evil = self.root / 'bad-settings.zip'
         with zipfile.ZipFile(saved) as src, zipfile.ZipFile(evil, 'w') as dst:
             for item in src.infolist():
@@ -191,22 +192,22 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(next(x for x in manifest['plugins'] if x['id'] == 'test.example')['version'], '1.0.0')
 
     def test_backup_inside_plugin_data_is_rejected(self):
-        with self.assertRaises(VaultError): self.engine.backup(self.source, self.source / 'plugin-data/backups')
+        with self.assertRaises(VaultError): self.engine.backup(self.source, self.source / 'plugin-data/backups', allow_unencrypted=True)
 
     def test_running_joplin_guard_prevents_write(self):
         def guard(): raise VaultError('running')
-        with self.assertRaises(VaultError): Engine(guard).backup(self.source, self.root / 'backups')
+        with self.assertRaises(VaultError): Engine(guard).backup(self.source, self.root / 'backups', allow_unencrypted=True)
         self.assertFalse((self.root / 'backups').exists())
 
     def test_another_instance_cannot_backup_while_restore_holds_profile_lock(self):
         other = Engine(guard=lambda: None)
         with self.engine.operation(self.source):
             with self.assertRaisesRegex(VaultError, '另一个'):
-                other.backup(self.source, self.root / 'backups')
-        self.assertTrue(other.backup(self.source, self.root / 'backups').exists())
+                other.backup(self.source, self.root / 'backups', allow_unencrypted=True)
+        self.assertTrue(other.backup(self.source, self.root / 'backups', allow_unencrypted=True).exists())
 
     def test_recover_interrupted_restore_from_automatic_snapshot(self):
-        recovery = self.engine.backup(self.target, self.root / 'recovery')
+        recovery = self.engine.backup(self.target, self.root / 'recovery', allow_unencrypted=True)
         (self.target / 'plugins/target.extra.jpl').write_bytes(b'partial-broken-package')
         with contextlib.closing(sqlite3.connect(self.target / 'database.sqlite')) as conn:
             conn.execute("UPDATE settings SET value='partial' WHERE key='plugin-target.extra.value'")
@@ -223,7 +224,7 @@ class CoreTests(unittest.TestCase):
         (sub / 'plugins').rename(parent / 'plugins')
         layout = Layout.discover(sub)
         self.assertEqual(layout.root, parent)
-        saved = self.engine.backup(sub, self.root / 'backups')
+        saved = self.engine.backup(sub, self.root / 'backups', allow_unencrypted=True)
         self.assertTrue(self.engine.preview(saved, sub)['shared_plugins'])
 
     @unittest.skipUnless(os.name == 'nt', 'Windows DPAPI')
@@ -231,6 +232,43 @@ class CoreTests(unittest.TestCase):
         encrypted = protect('not-a-real-password 复杂'.encode())
         self.assertNotIn(b'not-a-real-password', encrypted)
         self.assertEqual(protect(encrypted, True).decode(), 'not-a-real-password 复杂')
+
+    def test_default_backup_requires_password_or_explicit_plaintext_consent(self):
+        destination = self.root / 'backups'
+        for password in ['', 'short']:
+            with self.subTest(password=password), self.assertRaises(VaultError):
+                self.engine.backup(self.source, destination, password)
+        self.assertFalse(destination.exists())
+        encrypted = self.engine.backup(self.source, destination, 'fixture-password')
+        self.assertEqual(encrypted.suffix, '.enc')
+        plain = self.engine.backup(self.source, destination, allow_unencrypted=True)
+        with zipfile.ZipFile(plain) as archive:
+            self.assertIn('manifest.json', archive.namelist())
+
+    def test_legacy_plain_restore_requires_encrypted_recovery_snapshot(self):
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
+        before = database(self.target)
+        with self.assertRaises(VaultError):
+            self.engine.restore(saved, self.target, self.root / 'recovery')
+        self.assertEqual(before, database(self.target))
+        result = self.engine.restore(saved, self.target, self.root / 'recovery', 'fixture-password')
+        self.assertEqual(Path(result['recovery_backup']).suffix, '.enc')
+        self.assertEqual(database(self.target)[0]['plugin-test.example.value'], 'source')
+
+    def test_plaintext_intermediate_never_enters_backup_destination(self):
+        from vault.core import encrypt
+        from vault.security import temp_root
+        destination = self.root / 'backups'
+
+        def inspect_then_encrypt(source, pending, password):
+            self.assertTrue(source.is_relative_to(temp_root()))
+            self.assertEqual(list(destination.iterdir()), [])
+            self.assertTrue(zipfile.is_zipfile(source))
+            return encrypt(source, pending, password)
+
+        with patch('vault.core.encrypt', side_effect=inspect_then_encrypt):
+            saved = self.engine.backup(self.source, destination, 'fixture-password')
+        self.assertEqual(list(destination.iterdir()), [saved])
 
 
 if __name__ == '__main__': unittest.main()

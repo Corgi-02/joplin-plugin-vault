@@ -9,8 +9,8 @@ Windows x64 便携工具，用于本地或 WebDAV 备份、恢复 Joplin 插件�
 1. 解压发行包，运行 `JoplinPluginVault.exe`。
 2. 核对自动识别的配置目录与 `Joplin.exe` 路径；未识别时手动选择。可先点击“读取插件清单”查看内容。
 3. 在 Joplin 中选择“文件 → 退出”，确保托盘进程也已退出。
-4. 选择本地备份目录，填写并确认至少 8 个字符的密码，点击“创建完整插件备份”。手动备份可留空密码，但其中的插件设置可能含 API 密钥。
-5. 恢复时选择备份和目标配置目录，输入解密密码，点击“校验备份并预览”，核对后执行恢复。新电脑需先启动一次 Joplin 初始化配置，再退出。
+4. 选择本地备份目录，填写并确认至少 8 个字符的密码，点击“创建完整插件备份”。默认要求加密；手动创建明文备份需勾选“允许明文备份”并再次确认，其中可能包含 API 密钥等敏感信息。
+5. 恢复时选择备份和目标配置目录，输入解密 / 快照密码，点击“校验备份并预览”，核对后执行恢复。旧明文备份也需填写至少 8 位密码，用于加密恢复前快照。新电脑需先启动一次 Joplin 初始化配置，再退出。
 
 备份文件后缀为 `.jpv.zip`，加密备份为 `.jpv.enc`。旧备份不会自动删除。备份密码不会保存，遗失后无法解密。
 
@@ -36,7 +36,7 @@ Windows x64 便携工具，用于本地或 WebDAV 备份、恢复 Joplin 插件�
 - 常见程序路径：`C:\Program Files\Joplin\Joplin.exe` 或 `%LOCALAPPDATA%\Programs\Joplin\Joplin.exe`。
 - 所在目录可写时，偏好、日志、默认备份、下载缓存和恢复前快照位于程序旁的 `VaultData`；否则使用 `%LOCALAPPDATA%\JoplinPluginVault`。
 
-迁移时保留程序和备份文件即可，无需沿用旧电脑的配置路径。日志不记录密码和插件设置值。
+迁移时保留程序和备份文件即可，无需沿用旧电脑的配置路径。日志不记录密码和插件设置值，并对完整路径和服务器 URL 脱敏。偏好仍保存本机路径、WebDAV URL 和用户名，请将 `VaultData` 保存在可信且访问权限受限的位置。新建数据目录使用当前用户权限限制；已有目录的权限不会自动重写。
 
 ## WebDAV 与定时备份
 
@@ -44,7 +44,7 @@ Windows x64 便携工具，用于本地或 WebDAV 备份、恢复 Joplin 插件�
 
 可在创建本地备份后自动上传，也可上传所选历史备份。远程备份可下载后预览、恢复。上传先写临时文件，再通过 MOVE 发布；已有同名备份不会覆盖。上传失败时，本地备份仍会保留。
 
-服务器需支持 Basic 认证及 MKCOL、PROPFIND、PUT、MOVE、HEAD、GET、DELETE 方法。HEAD 不受支持或不能确认文件大小时，会尝试 WebDAV 属性，再回退到下载校验。HTTPS 使用系统证书校验；重定向地址需改填最终 URL。
+WebDAV 必须使用 HTTPS，HTTP 仅允许 `127.0.0.1`、`::1` 等字面量回环 IP 做本机测试，并绕过系统代理。服务器需支持 Basic 认证及 MKCOL、PROPFIND、PUT、MOVE、HEAD、GET、DELETE 方法。HEAD 不受支持或不能确认文件大小时，会尝试 WebDAV 属性，再回退到下载校验。HTTPS 使用系统证书校验；重定向地址需改填最终 URL。
 
 “在本机记住 WebDAV 密码”使用 Windows DPAPI，仅当前 Windows 用户可解密，换电脑需要重新输入。这与备份加密密码相互独立。
 
@@ -52,9 +52,11 @@ Windows x64 便携工具，用于本地或 WebDAV 备份、恢复 Joplin 插件�
 
 ## 恢复失败或中断
 
-恢复前先校验所有备份文件的 SHA-256，再生成目标环境的恢复前快照，保存在 `VaultData/recovery`（或备用数据目录的 `recovery`）。加密备份的恢复前快照使用本次输入的同一密码。
+恢复前先校验所有备份文件的 SHA-256，再生成加密的目标环境快照，保存在 `VaultData/recovery`（或备用数据目录的 `recovery`），使用本次输入的解密 / 快照密码。旧版明文恢复前快照仍支持通过“修复中断的恢复”还原。
 
 常规失败会自动回退。若遇断电、进程终止或回退失败，配置目录会留下 `plugin-vault-recovery.json`。保留该记录、`.jpv-swap-*` 目录及恢复前快照，暂勿启动 Joplin。在“预览与恢复”页输入快照密码，点击“修复中断的恢复”，还原恢复前环境。
+
+明文中间文件存放于本机 `%LOCALAPPDATA%\JoplinPluginVault\temporary` 的受限临时目录，不放入所选备份目录；完成后才将最终文件写入备份目录。启动时会检查遗留临时文件，也可在“操作记录”页手动检查。清理需确认，并跳过正在使用的目录；旧版无标识目录仅提示手动检查。恢复记录和回退目录不会被清理。临时数据仍会写入磁盘，删除不等于安全擦除；本机磁盘加密可进一步降低介质泄露风险。
 
 ## 源码与构建
 
@@ -74,8 +76,12 @@ Windows x64 便携工具，用于本地或 WebDAV 备份、恢复 Joplin 插件�
 ```powershell
 ./.venv/Scripts/python.exe main.py
 ./.venv/Scripts/python.exe -m unittest discover -s tests -v
+git config --local core.hooksPath .githooks
+./.venv/Scripts/python.exe scripts/check_secrets.py --all
 ```
 
 只读检查入口：`main.py --inspect 配置目录 --output 清单.json`，输出插件元数据及设置数量，不输出设置值。
+
+提交前检查读取 Git 暂存区，拦截常见密钥格式、个人 Windows 路径和运行数据文件，仅报告文件名与类别。新克隆需运行上述 hooks 配置命令启用；此基础检查不保证识别所有秘密。
 
 `vault/` 为程序源码，`tests/` 保留恢复、加密、路径识别及模拟 WebDAV 的回归测试。`build/`、`dist/`、`release/` 为生成目录；清理时请先保留其中可能存在的 `VaultData` 用户数据。

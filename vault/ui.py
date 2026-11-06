@@ -11,9 +11,10 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import __version__
-from .core import Engine, Layout, VaultError, inventory, list_local
+from .core import Engine, Layout, VaultError, inventory, list_local, validate_backup_password
 from .paths import initial_paths
 from .preferences import data_dir, load, save
+from .security import cleanup_workspaces, legacy_workspaces, redact_log, stale_workspaces
 from .webdav import WebDav
 
 
@@ -43,6 +44,7 @@ class App:
         self.folder = tk.StringVar(value=config.get('folder', str(self.home / 'backups')))
         self.password = tk.StringVar()
         self.confirm_password = tk.StringVar()
+        self.plain_backup = tk.BooleanVar(value=False)
         self.archive = tk.StringVar()
         self.restore_password = tk.StringVar()
         self.dav_url = tk.StringVar(value=config.get('dav_url', ''))
@@ -100,6 +102,7 @@ class App:
         self.make_restore_tab()
         self.make_dav_tab()
         self.log_box = ScrolledText(self.log_tab, font=('Consolas', 10), state='disabled', relief='flat')
+        self.button(self.log_tab, '检查并清理遗留临时文件', self.check_temp_files).pack(anchor='w', pady=(0, 8))
         self.log_box.pack(fill='both', expand=True)
         self.progress = ttk.Progressbar(outer, mode='indeterminate')
         # Reserve the footer before allocating the notebook's expanding area.
@@ -113,6 +116,7 @@ class App:
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.poll_queue)
         root.after(60_000, self.scheduler)
+        root.after(500, self.check_temp_files)
         self.refresh_local()
         if warning: self.log(warning)
         if not profile or not exe: self.log('未识别到有效的 Joplin 配置目录或程序路径，请参照示例手动选择。')
@@ -132,11 +136,14 @@ class App:
         self.button(p, '选择目录', self.choose_folder).grid(row=0, column=2, padx=(8, 0))
         passwords = ttk.Frame(p)
         passwords.grid(row=1, column=0, columnspan=3, sticky='ew', pady=12)
-        ttk.Label(passwords, text='备份密码（可选）').pack(side='left')
+        ttk.Label(passwords, text='备份密码').pack(side='left')
         ttk.Entry(passwords, textvariable=self.password, show='●', width=24).pack(side='left', padx=(10, 18))
         ttk.Label(passwords, text='确认密码').pack(side='left')
         ttk.Entry(passwords, textvariable=self.confirm_password, show='●', width=24).pack(side='left', padx=10)
-        ttk.Label(p, text='密码不会保存。WebDAV 备份建议加密；密码遗失后无法解密。', style='Hint.TLabel').grid(row=2, column=0, columnspan=3, sticky='w')
+        options = ttk.Frame(p)
+        options.grid(row=2, column=0, columnspan=3, sticky='ew')
+        ttk.Checkbutton(options, text='允许明文备份（空密码，需确认）', variable=self.plain_backup).pack(side='left')
+        ttk.Label(options, text='默认加密；密码至少 8 位，不会保存。', style='Hint.TLabel').pack(side='left', padx=12)
         actions = ttk.Frame(p)
         actions.grid(row=3, column=0, columnspan=3, sticky='ew', pady=12)
         self.button(actions, '创建完整插件备份', self.backup).pack(side='left')
@@ -169,9 +176,11 @@ class App:
         self.button(p, '选择文件', self.choose_archive).grid(row=0, column=2, padx=(8, 0))
         fields = ttk.Frame(p)
         fields.grid(row=1, column=0, columnspan=3, sticky='ew', pady=12)
-        ttk.Label(fields, text='解密密码').pack(side='left')
-        ttk.Entry(fields, textvariable=self.restore_password, show='●', width=32).pack(side='left', padx=12)
-        self.button(fields, '校验备份并预览', self.preview_restore).pack(side='left')
+        fields.columnconfigure(1, weight=1)
+        ttk.Label(fields, text='解密 / 快照密码').grid(row=0, column=0, sticky='w')
+        ttk.Entry(fields, textvariable=self.restore_password, show='●', width=32).grid(row=0, column=1, sticky='ew', padx=12)
+        self.button(fields, '校验备份并预览', self.preview_restore).grid(row=0, column=2)
+        ttk.Label(fields, text='旧明文备份也需填写，用于加密恢复前快照。', style='Hint.TLabel').grid(row=1, column=0, columnspan=3, sticky='w', pady=(6, 0))
         self.preview_box = ScrolledText(p, font=('Microsoft YaHei UI', 10), state='disabled', wrap='word', relief='flat')
         self.preview_box.grid(row=2, column=0, columnspan=3, sticky='nsew')
         p.rowconfigure(2, weight=1)
@@ -244,6 +253,7 @@ class App:
         return WebDav(self.dav_url.get(), self.dav_user.get(), self.dav_password.get())
 
     def log(self, text):
+        text = redact_log(text)
         stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         line = f'[{stamp}] {text}\n'
         self.log_box.configure(state='normal'); self.log_box.insert('end', line); self.log_box.see('end'); self.log_box.configure(state='disabled')
@@ -251,6 +261,21 @@ class App:
         try:
             with (self.home / 'operations.log').open('a', encoding='utf-8') as f: f.write(line)
         except OSError: pass
+
+    def check_temp_files(self):
+        if self.busy:
+            return
+        try:
+            stale = stale_workspaces()
+            if stale and messagebox.askyesno('遗留临时文件', f'发现 {len(stale)} 个未使用的临时目录，可能包含明文插件设置。\n\n清理这些临时文件？恢复记录及恢复前快照会保留。', icon='warning'):
+                removed, skipped = cleanup_workspaces(stale)
+                self.log(f'已清理 {removed} 个遗留临时目录；跳过 {skipped} 个正在使用或无法安全处理的目录。')
+            legacy = legacy_workspaces(self.folder.get())
+            if legacy:
+                self.log(f'发现 {len(legacy)} 个旧版临时目录，请退出其他工具实例后手动检查。')
+                messagebox.showwarning('旧版临时文件', '以下目录可能包含旧版遗留的明文数据。请先退出其他实例，再手动确认清理；程序不会自动删除。\n\n' + '\n'.join(map(str, legacy)))
+        except OSError as exc:
+            self.log('临时文件检查未完成：' + str(exc))
 
     def submit(self, label, action, done=None):
         if self.busy: return
@@ -303,21 +328,22 @@ class App:
         try:
             password = self.password.get()
             if password != self.confirm_password.get(): raise VaultError('两次备份密码不一致。')
-            if password and len(password) < 8: raise VaultError('备份密码请至少使用 8 个字符。')
-            if scheduled and not password: raise VaultError('定时备份需先填写并确认备份密码。')
+            allow_unencrypted = self.plain_backup.get() and not scheduled
+            validate_backup_password(password, allow_unencrypted)
             if scheduled: self.engine.guard()
             profile, folder, exe = self.profile.get(), self.folder.get(), self.exe.get()
             if not folder: raise VaultError('请选择本地备份目录。')
             dav = self.dav() if self.upload.get() else None
-            if dav and not password and not scheduled:
-                if not messagebox.askyesno('未加密备份', '插件设置可能包含 API 密钥。本次未设置备份密码，仍上传未加密备份到 WebDAV？'): return
+            if not password:
+                destination = '本地目录并上传 WebDAV' if dav else '本地目录'
+                if not messagebox.askyesno('确认明文备份', f'插件设置及插件数据可能含 API 密钥、登录信息等敏感内容。\n明文备份可被直接读取，请确认备份目录可信且访问权限受限。\n\n仍将明文备份保存到{destination}？', icon='warning'): return
             self.save_preferences(quiet=True)
         except Exception as exc:
             if scheduled: self.log('定时备份跳过：' + str(exc))
             else: messagebox.showerror('无法开始备份', str(exc))
             return
         def action():
-            path = self.engine.backup(profile, folder, password, exe)
+            path = self.engine.backup(profile, folder, password, exe, allow_unencrypted=allow_unencrypted)
             if dav:
                 try: dav.upload(path)
                 except Exception as exc: return path, '本地备份已成功，WebDAV 上传失败：' + str(exc)
@@ -325,7 +351,7 @@ class App:
         def finished(result):
             path, warning = result
             self.last_backup = time.time(); self.refresh_local()
-            self.log(warning if warning else '备份成功：' + str(path) + ('；WebDAV 上传完成。' if dav else ''))
+            self.log(warning if warning else '备份成功：' + path.name + ('；WebDAV 上传完成。' if dav else ''))
             if warning: messagebox.showwarning('本地备份已保留', warning)
         self.submit('正在创建插件环境备份……', action, finished)
 
@@ -372,13 +398,18 @@ class App:
 
     def restore(self):
         if not self.preview: return
+        try:
+            validate_backup_password(self.restore_password.get())
+        except VaultError:
+            messagebox.showerror('需要快照密码', '请在“解密 / 快照密码”中填写至少 8 位密码。\n旧明文备份也需填写，用于加密恢复前快照，然后重新预览。')
+            return
         preview = self.preview
         if not messagebox.askyesno('确认恢复插件环境', f'恢复目标：\n{preview["target"]}\n\n恢复 {len(preview["manifest"]["plugins"])} 个插件包及其设置和数据。\n移除目标额外插件 {len(preview["remove"])} 个。\n\n会先创建恢复前快照。请确认 Joplin 已完全退出。\n\n执行恢复？', icon='warning'): return
         archive, profile, password, exe = self.archive.get(), self.profile.get(), self.restore_password.get(), self.exe.get()
         recovery = self.home / 'recovery'
         def finished(result):
             self.invalidate_preview()
-            self.log(f'恢复完成：{result["plugins"]} 个插件包，{result["settings"]} 项数据库设置。恢复前快照：{result["recovery_backup"]}')
+            self.log(f'恢复完成：{result["plugins"]} 个插件包，{result["settings"]} 项数据库设置。恢复前快照：{Path(result["recovery_backup"]).name}')
             messagebox.showinfo('恢复完成', '插件环境已恢复，可以启动 Joplin。\n\n需要重新登录或调整路径的项目请参见预览中的提示。')
         self.submit('正在留存恢复前快照并恢复插件环境……', lambda: self.engine.restore(archive, profile, recovery, password, exe, preview['archive_sha256']), finished)
 
@@ -416,7 +447,7 @@ class App:
         except Exception as exc: messagebox.showinfo('下载备份', str(exc)); return
         def finished(path):
             self.archive.set(str(path)); self.notebook.select(self.restore_tab)
-            self.log('下载完成，请输入解密密码并预览：' + str(path))
+            self.log('下载完成，请输入解密密码并预览：' + path.name)
         self.submit('正在下载所选 WebDAV 备份……', lambda: dav.download(name, self.home / 'downloads'), finished)
 
     def launch_joplin(self):

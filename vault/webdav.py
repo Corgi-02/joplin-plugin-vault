@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import os
 import urllib.error
 import urllib.parse
@@ -23,13 +24,24 @@ class WebDav:
         parts = urllib.parse.urlsplit(url.strip())
         if parts.scheme not in ['http', 'https'] or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
             raise VaultError('请填写不带账号、密码、查询参数的完整 WebDAV 文件夹 URL。')
+        if parts.scheme == 'http':
+            try:
+                loopback = ipaddress.ip_address(parts.hostname).is_loopback
+            except ValueError:
+                loopback = False
+            if not loopback:
+                raise VaultError('WebDAV 必须使用 HTTPS；HTTP 仅允许本机回环 IP 测试。')
         decoded = urllib.parse.unquote(parts.path)
         if any(x in ['.', '..'] for x in decoded.split('/')):
             raise VaultError('WebDAV 地址包含无效路径。')
         self.base = urllib.parse.urlunsplit((parts.scheme, parts.netloc, urllib.parse.quote(decoded.rstrip('/') + '/', safe='/'), '', ''))
         self.parts = urllib.parse.urlsplit(self.base)
         self.timeout = timeout
-        self.opener = urllib.request.build_opener(NoRedirect())
+        # Loopback test credentials must never travel through an HTTP proxy.
+        handlers = [NoRedirect()]
+        if parts.scheme == 'http':
+            handlers.append(urllib.request.ProxyHandler({}))
+        self.opener = urllib.request.build_opener(*handlers)
         self.auth = 'Basic ' + base64.b64encode((username + ':' + password).encode()).decode() if username else ''
 
     def url(self, name=''):
@@ -38,6 +50,9 @@ class WebDav:
         return self.base + urllib.parse.quote(name, safe='')
 
     def request(self, method, url=None, data=None, headers=None, allowed=()):
+        target = urllib.parse.urlsplit(url or self.base)
+        if (target.scheme, target.netloc) != (self.parts.scheme, self.parts.netloc):
+            raise VaultError('已拒绝向不同服务器或协议发送 WebDAV 凭据。')
         request_headers = {'User-Agent': 'JoplinPluginVault/1.0', **(headers or {})}
         if self.auth:
             request_headers['Authorization'] = self.auth

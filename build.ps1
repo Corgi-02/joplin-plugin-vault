@@ -11,6 +11,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
     & $pythonPath -m unittest discover -s tests -v
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+    if (Test-Path -LiteralPath .git) {
+        & $pythonPath scripts/check_secrets.py --all
+        if ($LASTEXITCODE -ne 0) { throw 'Source secret check failed' }
+    }
     & $pythonPath -m PyInstaller --noconfirm --onefile --windowed --name JoplinPluginVault --collect-all cryptography --specpath build --workpath build/pyinstaller main.py
     if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
     Copy-Item -LiteralPath README.md,README.en.md -Destination dist
@@ -26,12 +30,14 @@ try {
     $sourceStage = Join-Path $projectDirectory ('build/source-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $sourceStage | Out-Null
     try {
-        Copy-Item -LiteralPath main.py,build.ps1,requirements.txt,README.md,README.en.md,.gitignore -Destination $sourceStage
-        foreach ($folder in @('vault', 'tests')) {
+        Copy-Item -LiteralPath main.py,build.ps1,requirements.txt,README.md,README.en.md,.gitignore,.gitattributes -Destination $sourceStage
+        foreach ($folder in @('vault', 'tests', 'scripts')) {
             $targetFolder = Join-Path $sourceStage $folder
             New-Item -ItemType Directory -Path $targetFolder | Out-Null
             Get-ChildItem -LiteralPath $folder -File -Filter '*.py' | Copy-Item -Destination $targetFolder
         }
+        New-Item -ItemType Directory -Path (Join-Path $sourceStage '.githooks') | Out-Null
+        Copy-Item -LiteralPath .githooks/pre-commit -Destination (Join-Path $sourceStage '.githooks/pre-commit')
         Compress-Archive -Path (Join-Path $sourceStage '*') -DestinationPath $sourceArchive -Force
     } finally {
         $resolvedStage = [System.IO.Path]::GetFullPath($sourceStage)

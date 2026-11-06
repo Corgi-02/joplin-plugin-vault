@@ -10,7 +10,6 @@ import shutil
 import sqlite3
 import subprocess
 import tarfile
-import tempfile
 import threading
 import uuid
 import zipfile
@@ -21,6 +20,7 @@ from typing import Callable
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from .security import private_workspace
 
 MAGIC = b'JPVAULT1'
 CHUNK = 1024 * 1024
@@ -32,6 +32,14 @@ BACKUP_NAME = re.compile(r'^joplin-plugins-\d{8}T\d{6}Z-[a-f0-9]{8}\.jpv\.(zip|e
 
 class VaultError(Exception):
     pass
+
+
+def validate_backup_password(password, allow_unencrypted=False):
+    if not password:
+        if not allow_unencrypted:
+            raise VaultError('请填写至少 8 个字符的备份密码；明文备份需显式选择并确认。')
+    elif len(password) < 8:
+        raise VaultError('备份密码请至少使用 8 个字符。')
 
 
 def managed_key(key):
@@ -253,7 +261,7 @@ def decrypt(source: Path, destination: Path, password: str):
 
 @contextlib.contextmanager
 def open_archive(source: Path, password=''):
-    with tempfile.TemporaryDirectory(prefix='jpv-verify-') as work:
+    with private_workspace('verify') as work:
         with source.open('rb') as f:
             encrypted = f.read(8) == MAGIC
         plain = Path(work) / 'decrypted.zip' if encrypted else source
@@ -375,7 +383,8 @@ class Engine:
                 else: fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     @serialized(0)
-    def backup(self, profile, destination, password='', joplin_exe=''):
+    def backup(self, profile, destination, password='', joplin_exe='', *, allow_unencrypted=False):
+        validate_backup_password(password, allow_unencrypted)
         self.guard()
         layout = Layout.discover(profile)
         destination = Path(destination).expanduser().absolute().resolve()
@@ -385,7 +394,7 @@ class Engine:
         manifest, sources = inventory(layout, joplin_exe)
         name = 'joplin-plugins-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
         target = destination / (name + ('.jpv.enc' if password else '.jpv.zip'))
-        with tempfile.TemporaryDirectory(prefix='jpv-backup-', dir=destination) as work:
+        with private_workspace('backup') as work:
             plain = Path(work) / 'snapshot.zip'
             files = {}
             with zipfile.ZipFile(plain, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as archive:
@@ -414,13 +423,23 @@ class Engine:
             # Verify our output before publishing it as a completed backup.
             with open_archive(pending, password) as archive:
                 validate_archive(archive)
-            os.replace(pending, target)
+            # Only the completed output enters the chosen backup directory.
+            # Copy first so publication remains atomic across local volumes.
+            publishing = destination / ('.' + name + '-' + uuid.uuid4().hex + '.partial')
+            try:
+                with pending.open('rb') as src, publishing.open('xb') as dst:
+                    shutil.copyfileobj(src, dst, CHUNK)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+                os.replace(publishing, target)
+            finally:
+                publishing.unlink(missing_ok=True)
         return target
 
     def preview(self, archive_path, profile, password=''):
         layout = Layout.discover(profile)
         # Bind the preview and its hash to the same immutable input copy.
-        with tempfile.TemporaryDirectory(prefix='jpv-preview-') as work:
+        with private_workspace('preview') as work:
             frozen = Path(work) / 'input.backup'
             shutil.copyfile(archive_path, frozen)
             with open_archive(frozen, password) as archive:
@@ -435,12 +454,14 @@ class Engine:
 
     @serialized(1)
     def restore(self, archive_path, profile, recovery_dir, password='', joplin_exe='', expected_hash=None, fault=None, _recovering=False):
+        if not _recovering:
+            validate_backup_password(password)
         self.guard()
         layout = Layout.discover(profile)
         archive_path = Path(archive_path).absolute()
         # The original archive is copied before verification, preventing a
         # preview/restore race or replacement of the input during extraction.
-        with tempfile.TemporaryDirectory(prefix='jpv-restore-') as work:
+        with private_workspace('restore') as work:
             work = Path(work)
             frozen = work / 'input.backup'
             shutil.copyfile(archive_path, frozen)

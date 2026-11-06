@@ -1,6 +1,5 @@
 import base64
 import ctypes
-import json
 import os
 import sys
 from pathlib import Path
@@ -18,14 +17,14 @@ def data_dir():
     # fall back to the current user's app-data directory.
     adjacent = app_dir() / 'VaultData'
     try:
-        adjacent.mkdir(parents=True, exist_ok=True)
+        adjacent.mkdir(mode=0o700, parents=True, exist_ok=True)
         probe = adjacent / '.write-test'
         with probe.open('wb'): pass
         probe.unlink()
         return adjacent
     except OSError:
         fallback = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'JoplinPluginVault'
-        fallback.mkdir(parents=True, exist_ok=True)
+        fallback.mkdir(mode=0o700, parents=True, exist_ok=True)
         return fallback
 
 
