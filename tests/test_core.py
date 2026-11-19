@@ -10,7 +10,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from vault.core import Engine, Layout, VaultError, atomic_json, inventory, digest
+from vault.core import Engine, Layout, LOCAL_MAGIC, VaultError, atomic_json, inventory, digest
 from vault.preferences import protect
 
 
@@ -245,15 +245,30 @@ class CoreTests(unittest.TestCase):
         with zipfile.ZipFile(plain) as archive:
             self.assertIn('manifest.json', archive.namelist())
 
-    def test_legacy_plain_restore_requires_encrypted_recovery_snapshot(self):
+    @unittest.skipUnless(os.name == 'nt', 'Windows DPAPI')
+    def test_plain_restore_without_password_creates_repairable_encrypted_snapshot(self):
         saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
         before = database(self.target)
-        with self.assertRaises(VaultError):
-            self.engine.restore(saved, self.target, self.root / 'recovery')
-        self.assertEqual(before, database(self.target))
-        result = self.engine.restore(saved, self.target, self.root / 'recovery', 'fixture-password')
-        self.assertEqual(Path(result['recovery_backup']).suffix, '.enc')
+        preview = self.engine.preview(saved, self.target)
+        result = self.engine.restore(saved, self.target, self.root / 'recovery', expected_hash=preview['archive_sha256'])
+        snapshot = Path(result['recovery_backup'])
+        self.assertEqual(snapshot.suffix, '.enc')
+        self.assertEqual(snapshot.read_bytes()[:8], LOCAL_MAGIC)
+        self.assertFalse(zipfile.is_zipfile(snapshot))
         self.assertEqual(database(self.target)[0]['plugin-test.example.value'], 'source')
+        atomic_json(self.target / 'plugin-vault-recovery.json', {'status': 'applying', 'recovery_backup': str(snapshot)})
+        self.engine.recover_interrupted(self.target)
+        self.assertEqual(before, database(self.target))
+
+    def test_plain_restore_stops_before_writing_when_snapshot_cannot_be_protected(self):
+        saved = self.engine.backup(self.source, self.root / 'backups', allow_unencrypted=True)
+        before = database(self.target)
+        with patch('vault.core.protect', side_effect=OSError('fixture failure')):
+            with self.assertRaisesRegex(VaultError, '无法保护恢复前快照'):
+                self.engine.restore(saved, self.target, self.root / 'recovery')
+        self.assertEqual(before, database(self.target))
+        self.assertFalse((self.target / 'plugin-vault-recovery.json').exists())
+        self.assertEqual(list((self.root / 'recovery').iterdir()), [])
 
     def test_plaintext_intermediate_never_enters_backup_destination(self):
         from vault.core import encrypt

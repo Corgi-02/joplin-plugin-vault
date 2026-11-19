@@ -177,10 +177,10 @@ class App:
         fields = ttk.Frame(p)
         fields.grid(row=1, column=0, columnspan=3, sticky='ew', pady=12)
         fields.columnconfigure(1, weight=1)
-        ttk.Label(fields, text='解密 / 快照密码').grid(row=0, column=0, sticky='w')
+        ttk.Label(fields, text='备份解密密码').grid(row=0, column=0, sticky='w')
         ttk.Entry(fields, textvariable=self.restore_password, show='●', width=32).grid(row=0, column=1, sticky='ew', padx=12)
         self.button(fields, '校验备份并预览', self.preview_restore).grid(row=0, column=2)
-        ttk.Label(fields, text='旧明文备份也需填写，用于加密恢复前快照。', style='Hint.TLabel').grid(row=1, column=0, columnspan=3, sticky='w', pady=(6, 0))
+        ttk.Label(fields, text='明文备份留空即可预览和恢复；恢复前快照由 Windows 自动加密。', style='Hint.TLabel').grid(row=1, column=0, columnspan=3, sticky='w', pady=(6, 0))
         self.preview_box = ScrolledText(p, font=('Microsoft YaHei UI', 10), state='disabled', wrap='word', relief='flat')
         self.preview_box.grid(row=2, column=0, columnspan=3, sticky='nsew')
         p.rowconfigure(2, weight=1)
@@ -398,11 +398,6 @@ class App:
 
     def restore(self):
         if not self.preview: return
-        try:
-            validate_backup_password(self.restore_password.get())
-        except VaultError:
-            messagebox.showerror('需要快照密码', '请在“解密 / 快照密码”中填写至少 8 位密码。\n旧明文备份也需填写，用于加密恢复前快照，然后重新预览。')
-            return
         preview = self.preview
         if not messagebox.askyesno('确认恢复插件环境', f'恢复目标：\n{preview["target"]}\n\n恢复 {len(preview["manifest"]["plugins"])} 个插件包及其设置和数据。\n移除目标额外插件 {len(preview["remove"])} 个。\n\n会先创建恢复前快照。请确认 Joplin 已完全退出。\n\n执行恢复？', icon='warning'): return
         archive, profile, password, exe = self.archive.get(), self.profile.get(), self.restore_password.get(), self.exe.get()
@@ -422,7 +417,7 @@ class App:
         profile, password, exe = self.profile.get(), self.restore_password.get(), self.exe.get()
         if not (Path(profile) / 'plugin-vault-recovery.json').exists():
             messagebox.showinfo('恢复记录', '此配置目录没有未完成的恢复记录。'); return
-        if not messagebox.askyesno('修复中断的恢复', '将从恢复记录中的“恢复前快照”还原插件环境。请先退出 Joplin。\n\n如果快照已加密，请先在解密密码框填写密码。\n\n执行修复？', icon='warning'): return
+        if not messagebox.askyesno('修复中断的恢复', '将使用恢复前快照还原插件环境。请先退出 Joplin。\n\n快照若由 Windows 用户保护，请用原 Windows 用户执行；若创建快照时使用了密码，请填写该密码。\n\n执行修复？', icon='warning'): return
         self.submit('正在还原恢复前插件环境……',
                     lambda: self.engine.recover_interrupted(profile, password, exe),
                     lambda result: self.log('中断恢复已修复，插件环境回到恢复前状态。'))
@@ -447,7 +442,7 @@ class App:
         except Exception as exc: messagebox.showinfo('下载备份', str(exc)); return
         def finished(path):
             self.archive.set(str(path)); self.notebook.select(self.restore_tab)
-            self.log('下载完成，请输入解密密码并预览：' + path.name)
+            self.log('下载完成，请预览备份。仅密码加密的备份需要填写解密密码：' + path.name)
         self.submit('正在下载所选 WebDAV 备份……', lambda: dav.download(name, self.home / 'downloads'), finished)
 
     def launch_joplin(self):

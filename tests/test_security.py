@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,7 +77,13 @@ with security.private_workspace('verify') as folder:
             self.assertEqual(stale_workspaces(), [])
             child.kill()
             child.wait(timeout=10)
+            # On Windows the virtual-environment launcher can exit before its
+            # Python worker releases the file lock.
+            deadline = time.monotonic() + 2
             stale = stale_workspaces()
+            while not stale and time.monotonic() < deadline:
+                time.sleep(0.01)
+                stale = stale_workspaces()
             self.assertEqual([p.name for p in stale], [name])
             self.assertEqual(cleanup_workspaces(stale), (1, 0))
         finally:

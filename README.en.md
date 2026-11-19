@@ -10,7 +10,7 @@ A portable Windows x64 tool for backing up and restoring Joplin plugin environme
 2. Check the detected profile directory and `Joplin.exe` path, or select them manually. “读取插件清单” reads the current plugin inventory.
 3. In Joplin, choose File → Quit and make sure its tray process has exited too.
 4. Choose a local backup directory, enter and confirm a password of at least 8 characters, then click “创建完整插件备份”. Encryption is required by default. A manual plaintext backup requires selecting “允许明文备份” and confirming the warning; it may contain API keys and other secrets.
-5. To restore, select the backup and target profile, enter the decryption / recovery snapshot password, then click “校验备份并预览”. Review the changes before restoring. Legacy plaintext backups also require a password of at least 8 characters to encrypt the recovery snapshot. On a new computer, launch Joplin once to initialize its profile, then quit it.
+5. To restore, select the backup and target profile, then click “校验备份并预览”. Leave the password field blank for plaintext backups. For a password-encrypted backup, enter its original password. Review the changes before restoring. On a new computer, launch Joplin once to initialize its profile, then quit it.
 
 Backups use `.jpv.zip`, or `.jpv.enc` when encrypted. Old backups are not deleted automatically. Backup passwords are never saved; a lost password cannot be recovered.
 
@@ -52,9 +52,9 @@ Scheduled backups run only while the tool is open and require a confirmed backup
 
 ## Failed or interrupted restoration
 
-Before restoration, the tool verifies every backup file's SHA-256 and creates an encrypted snapshot of the target environment in `VaultData/recovery`, or `recovery` under the fallback data directory, using the supplied decryption / snapshot password. The interrupted-restore repair action still supports legacy plaintext recovery snapshots.
+Before restoration, the tool verifies every backup file's SHA-256 and creates an encrypted snapshot of the target environment in `VaultData/recovery`, or `recovery` under the fallback data directory. When restoring a plaintext backup, Windows protects the snapshot for the current user. Backups encrypted with a password of at least eight characters reuse that password for the snapshot.
 
-Normal failures trigger rollback. After power loss, process termination, or failed rollback, the profile may contain `plugin-vault-recovery.json`. Keep that record, any `.jpv-swap-*` directory, and the recovery snapshot. Do not launch Joplin yet. On the restore tab, enter the snapshot password and click “修复中断的恢复” to restore the environment from before the interrupted operation.
+Normal failures trigger rollback. After power loss, process termination, or failed rollback, the profile may contain `plugin-vault-recovery.json`. Keep that record, any `.jpv-swap-*` directory, and the recovery snapshot. Do not launch Joplin yet. On the restore tab, click “修复中断的恢复” to restore the environment from before the interrupted operation. For Windows-protected snapshots, use the original computer and Windows account with the password field blank. For password-protected snapshots, supply the original password. Legacy plaintext snapshots can also be repaired with the password field blank.
 
 Plaintext intermediate files use restricted local workspaces under `%LOCALAPPDATA%\JoplinPluginVault\temporary`, outside the chosen backup directory. Only completed output is copied to the backup directory. Startup checks for abandoned workspaces; the operation log tab also offers a manual check. Cleanup requires confirmation and skips active workspaces. Unmarked legacy directories are reported for manual inspection only. Recovery records and rollback directories are preserved. Temporary data still touches disk, and deletion is not secure erasure; local disk encryption provides additional protection against lost storage media.
 

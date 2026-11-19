@@ -1,11 +1,9 @@
 import base64
-import ctypes
 import os
 import sys
 from pathlib import Path
-from ctypes import wintypes
-
-from .core import atomic_json, read_json, VaultError
+from .core import atomic_json, read_json
+from .security import protect
 
 
 def app_dir():
@@ -26,21 +24,6 @@ def data_dir():
         fallback = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'JoplinPluginVault'
         fallback.mkdir(mode=0o700, parents=True, exist_ok=True)
         return fallback
-
-
-class Blob(ctypes.Structure):
-    _fields_ = [('cbData', wintypes.DWORD), ('pbData', ctypes.POINTER(ctypes.c_ubyte))]
-
-
-def protect(value, decrypt=False):
-    if os.name != 'nt': raise VaultError('凭据保存仅支持 Windows。')
-    buffer = (ctypes.c_ubyte * len(value)).from_buffer_copy(value)
-    source, output = Blob(len(value), buffer), Blob()
-    function = ctypes.windll.crypt32.CryptUnprotectData if decrypt else ctypes.windll.crypt32.CryptProtectData
-    ok = function(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(output))
-    if not ok: raise VaultError('本机凭据无法解密，请重新填写 WebDAV 密码。')
-    try: return ctypes.string_at(output.pbData, output.cbData)
-    finally: ctypes.windll.kernel32.LocalFree(output.pbData)
 
 
 def load():

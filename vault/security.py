@@ -2,15 +2,35 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import os
 import re
 import shutil
 import tempfile
+from ctypes import wintypes
 from pathlib import Path
 
 
 WORKSPACE_NAME = re.compile(r'jpv-(?:backup|verify|preview|restore)-[a-z0-9_]{8}')
 MARKER = b'JoplinPluginVault temporary workspace v1\n'
+
+
+class DataBlob(ctypes.Structure):
+    _fields_ = [('cbData', wintypes.DWORD), ('pbData', ctypes.POINTER(ctypes.c_ubyte))]
+
+
+def protect(value, decrypt=False):
+    if os.name != 'nt':
+        raise OSError('本机数据保护仅支持 Windows。')
+    buffer = (ctypes.c_ubyte * len(value)).from_buffer_copy(value)
+    source, output = DataBlob(len(value), buffer), DataBlob()
+    operation = ctypes.windll.crypt32.CryptUnprotectData if decrypt else ctypes.windll.crypt32.CryptProtectData
+    if not operation(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(output)):
+        raise OSError('Windows 数据保护操作失败。')
+    try:
+        return ctypes.string_at(output.pbData, output.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(output.pbData)
 
 
 def is_link(path):

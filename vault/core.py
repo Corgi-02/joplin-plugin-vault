@@ -20,9 +20,11 @@ from typing import Callable
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from .security import private_workspace
+from .security import private_workspace, protect
 
 MAGIC = b'JPVAULT1'
+LOCAL_MAGIC = b'JPVLOCAL'
+MAX_PROTECTED_KEY = 65536
 CHUNK = 1024 * 1024
 MAX_TOTAL = 100 * 1024**3
 MANAGED_KEYS = {'plugins.states', 'plugins.autoUpdateEnabled'}
@@ -217,10 +219,19 @@ def inventory(layout: Layout, joplin_exe=''):
             'settings_files': file_values, 'warnings': warnings}, sources
 
 
-def encrypt(source: Path, destination: Path, password: str):
-    salt, nonce = os.urandom(16), os.urandom(12)
-    key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 600_000, 32)
-    header = MAGIC + salt + nonce
+def encrypt(source: Path, destination: Path, password: str, *, local_recovery=False):
+    nonce = os.urandom(12)
+    if local_recovery:
+        key = os.urandom(32)
+        try:
+            protected_key = protect(key)
+        except OSError as exc:
+            raise VaultError('Windows 无法保护恢复前快照，未修改目标配置。') from exc
+        header = LOCAL_MAGIC + nonce + len(protected_key).to_bytes(4, 'big') + protected_key
+    else:
+        salt = os.urandom(16)
+        key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 600_000, 32)
+        header = MAGIC + salt + nonce
     cipher = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
     cipher.authenticate_additional_data(header)
     with source.open('rb') as src, destination.open('xb') as dst:
@@ -232,20 +243,42 @@ def encrypt(source: Path, destination: Path, password: str):
 
 
 def decrypt(source: Path, destination: Path, password: str):
-    if not password:
-        raise VaultError('此备份已加密，请输入备份密码。')
     try:
         with source.open('rb') as src:
-            header = src.read(36)
-            if len(header) != 36 or header[:8] != MAGIC or source.stat().st_size < 52:
+            magic = src.read(8)
+            if magic == LOCAL_MAGIC:
+                fields = src.read(16)
+                nonce = fields[:12]
+                key_size = int.from_bytes(fields[12:], 'big')
+                if len(fields) != 16 or not 0 < key_size <= MAX_PROTECTED_KEY:
+                    raise VaultError('本机恢复快照格式无效。')
+                protected_key = src.read(key_size)
+                if len(protected_key) != key_size:
+                    raise VaultError('本机恢复快照不完整。')
+                try:
+                    key = protect(protected_key, decrypt=True)
+                except OSError as exc:
+                    raise VaultError('无法解锁本机恢复快照，请使用创建快照时的 Windows 用户。') from exc
+                if len(key) != 32:
+                    raise VaultError('本机恢复快照密钥无效。')
+                header = magic + fields + protected_key
+            else:
+                if not password:
+                    raise VaultError('此备份已加密，请输入备份密码。')
+                fields = src.read(28)
+                if magic != MAGIC or len(fields) != 28:
+                    raise VaultError('加密备份格式无效。')
+                key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), fields[:16], 600_000, 32)
+                nonce = fields[16:]
+                header = magic + fields
+            remaining = source.stat().st_size - len(header) - 16
+            if remaining < 0:
                 raise VaultError('加密备份格式无效。')
-            key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), header[8:24], 600_000, 32)
             src.seek(-16, os.SEEK_END)
             tag = src.read(16)
-            src.seek(36)
-            cipher = Cipher(algorithms.AES(key), modes.GCM(header[24:], tag)).decryptor()
+            src.seek(len(header))
+            cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
             cipher.authenticate_additional_data(header)
-            remaining = source.stat().st_size - 52
             with destination.open('xb') as dst:
                 while remaining:
                     data = src.read(min(CHUNK, remaining))
@@ -256,6 +289,8 @@ def decrypt(source: Path, destination: Path, password: str):
                 dst.write(cipher.finalize())
     except InvalidTag as exc:
         destination.unlink(missing_ok=True)
+        if magic == LOCAL_MAGIC:
+            raise VaultError('本机恢复快照内容已损坏。') from exc
         raise VaultError('备份密码错误，或文件已损坏。') from exc
 
 
@@ -263,7 +298,7 @@ def decrypt(source: Path, destination: Path, password: str):
 def open_archive(source: Path, password=''):
     with private_workspace('verify') as work:
         with source.open('rb') as f:
-            encrypted = f.read(8) == MAGIC
+            encrypted = f.read(8) in (MAGIC, LOCAL_MAGIC)
         plain = Path(work) / 'decrypted.zip' if encrypted else source
         if encrypted:
             decrypt(source, plain, password)
@@ -383,8 +418,9 @@ class Engine:
                 else: fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     @serialized(0)
-    def backup(self, profile, destination, password='', joplin_exe='', *, allow_unencrypted=False):
-        validate_backup_password(password, allow_unencrypted)
+    def backup(self, profile, destination, password='', joplin_exe='', *, allow_unencrypted=False, _local_recovery=False):
+        if not _local_recovery:
+            validate_backup_password(password, allow_unencrypted)
         self.guard()
         layout = Layout.discover(profile)
         destination = Path(destination).expanduser().absolute().resolve()
@@ -393,7 +429,7 @@ class Engine:
         destination.mkdir(parents=True, exist_ok=True)
         manifest, sources = inventory(layout, joplin_exe)
         name = 'joplin-plugins-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
-        target = destination / (name + ('.jpv.enc' if password else '.jpv.zip'))
+        target = destination / (name + ('.jpv.enc' if password or _local_recovery else '.jpv.zip'))
         with private_workspace('backup') as work:
             plain = Path(work) / 'snapshot.zip'
             files = {}
@@ -416,7 +452,9 @@ class Engine:
                 archive.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2))
             self.guard()
             pending = Path(work) / 'completed'
-            if password:
+            if _local_recovery:
+                encrypt(plain, pending, '', local_recovery=True)
+            elif password:
                 encrypt(plain, pending, password)
             else:
                 shutil.copy2(plain, pending)
@@ -454,8 +492,6 @@ class Engine:
 
     @serialized(1)
     def restore(self, archive_path, profile, recovery_dir, password='', joplin_exe='', expected_hash=None, fault=None, _recovering=False):
-        if not _recovering:
-            validate_backup_password(password)
         self.guard()
         layout = Layout.discover(profile)
         archive_path = Path(archive_path).absolute()
@@ -467,6 +503,8 @@ class Engine:
             shutil.copyfile(archive_path, frozen)
             if expected_hash and digest(frozen) != expected_hash:
                 raise VaultError('备份文件在预览后发生变化，请重新预览。')
+            with frozen.open('rb') as stream:
+                uses_password = stream.read(len(MAGIC)) == MAGIC
             with open_archive(frozen, password) as archive:
                 manifest = validate_archive(archive)
                 stage = work / 'stage'
@@ -483,7 +521,11 @@ class Engine:
             journal = layout.profile / 'plugin-vault-recovery.json'
             if journal.exists() and not _recovering:
                 raise VaultError('检测到之前未完成的恢复，请先查看恢复记录及恢复前快照。')
-            recovery = archive_path if _recovering else self.backup(layout.profile, recovery_dir, password, joplin_exe)
+            recovery = archive_path
+            if not _recovering:
+                snapshot_password = password if uses_password and len(password) >= 8 else ''
+                recovery = self.backup(layout.profile, recovery_dir, snapshot_password, joplin_exe,
+                                       _local_recovery=not snapshot_password)
             stash = layout.root / ('.jpv-swap-' + uuid.uuid4().hex)
             atomic_json(journal, {'status': 'applying', 'recovery_backup': str(recovery), 'stash': str(stash), 'started_utc': datetime.now(timezone.utc).isoformat()})
             stash.mkdir()
